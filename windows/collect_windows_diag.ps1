@@ -1,7 +1,7 @@
-﻿# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Диагностика сети на Windows для поддержки VsemDOSTUP.
 #
-# Что делает: только ЧИТАЕТ настройки и делает до 6 сетевых GET-запросов
+# Что делает: только ЧИТАЕТ настройки и делает до 12 сетевых GET-запросов
 # (все к публичным адресам). Ничего не меняет, ничего не устанавливает,
 # файлов не создаёт, секретов не печатает.
 #
@@ -125,8 +125,8 @@ try {
     }
 } catch { }
 
-# --- 4. DNS и адрес chatgpt.com --------------------------------------------
-Section '4. DNS-серверы и адрес chatgpt.com'
+# --- 4. DNS и адреса ИИ-сервисов -------------------------------------------
+Section '4. DNS-серверы и адреса ИИ-сервисов'
 try {
     $dns = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
            Where-Object { $_.ServerAddresses } | Select-Object -First 4
@@ -135,40 +135,64 @@ try {
     }
 } catch { Line 'DNS-серверы: не определены' }
 
-$dnsAddr = ''
-try {
-    $res = Resolve-DnsName -Name 'chatgpt.com' -Type A -ErrorAction Stop |
-           Where-Object { $_.IPAddress } | Select-Object -First 3 -ExpandProperty IPAddress
-    $dnsAddr = ($res -join ' ')
-} catch { }
-if (-not $dnsAddr) {
+# Домен, вид сервиса и настоящий адрес (сверено через DoH 1.1.1.1).
+$services = @(
+    @{ Dom = 'chatgpt.com';           Kind = 'chatgpt'; Ref = '104.18.32.47' },
+    @{ Dom = 'claude.ai';             Kind = 'claude';  Ref = '160.79.104.10' },
+    @{ Dom = 'gemini.google.com';     Kind = 'google';  Ref = '142.251.157.2' },
+    @{ Dom = 'notebooklm.google.com'; Kind = 'google';  Ref = '172.217.20.174' }
+)
+
+function Resolve-Name([string]$Name) {
     try {
-        $res = [System.Net.Dns]::GetHostAddresses('chatgpt.com') |
-               Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
-               ForEach-Object { $_.IPAddressToString }
-        $dnsAddr = ($res -join ' ')
+        $r = Resolve-DnsName -Name $Name -Type A -ErrorAction Stop |
+             Where-Object { $_.IPAddress } | Select-Object -First 3 -ExpandProperty IPAddress
+        if ($r) { return ($r -join ' ') }
     } catch { }
+    try {
+        $r = [System.Net.Dns]::GetHostAddresses($Name) |
+             Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+             ForEach-Object { $_.IPAddressToString }
+        return ($r -join ' ')
+    } catch { return '' }
 }
-Line ("chatgpt.com решается в: " + $(if ($dnsAddr) { $dnsAddr } else { 'не определён' }))
-$dnsClass = 'none'
-if (-not $dnsAddr) {
-    $dnsClass = 'none'
-} elseif ($dnsAddr -match '(^|\s)(8\.47\.69\.|8\.6\.112\.)') {
-    $dnsClass = 'spoof'
-} elseif ($dnsAddr -match '^(240\.|198\.18\.|198\.19\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.)') {
-    $dnsClass = 'fake'
-} elseif ($dnsAddr -match '(^|\s)(104\.(1[6-9]|2[0-9]|3[01])\.|172\.(6[4-9]|7[01])\.|162\.159\.|188\.114\.)') {
-    $dnsClass = 'cloudflare'
-} else {
-    $dnsClass = 'other'
+
+function Test-Real([string]$Addr, [string]$Kind) {
+    switch ($Kind) {
+        'chatgpt' { return [bool]($Addr -match '(^|\s)(104\.(1[6-9]|2[0-9]|3[01])\.|172\.(6[4-9]|7[01])\.|162\.159\.|188\.114\.)') }
+        'claude'  { return [bool]($Addr -match '(^|\s)160\.79\.104\.') }
+        'google'  { return [bool]($Addr -match '(^|\s)(142\.25[0-9]\.|172\.217\.|216\.58\.|216\.239\.|172\.253\.|74\.125\.|108\.177\.|209\.85\.|64\.233\.|173\.194\.)') }
+    }
+    return $false
 }
-switch ($dnsClass) {
-    'spoof'      { Line 'ВНИМАНИЕ: это адрес-заглушка провайдера (подмена DNS), а не настоящий сервер ChatGPT.' }
-    'fake'       { Line ("Адрес " + $dnsAddr + " — внутренний адрес VPN-приложения (fake-IP), а не сервер ChatGPT. Так и должно быть: приложение само направляет трафик в туннель.") }
-    'cloudflare' { Line 'Адрес похож на настоящий сервер ChatGPT (сеть Cloudflare).' }
-    'other'      { Line ("ВНИМАНИЕ: адрес " + $dnsAddr + " не похож на настоящий сервер ChatGPT (Cloudflare). Вероятна подмена DNS.") }
-    default      { Line 'DNS не отдал адрес для chatgpt.com.' }
+
+$dnsClasses = @{}
+$dnsProblems = ''
+foreach ($s in $services) {
+    $addr = Resolve-Name $s.Dom
+    $cls = 'none'
+    if (-not $addr) {
+        $cls = 'none'
+    } elseif ($addr -match '(^|\s)(8\.47\.69\.|8\.6\.112\.)') {
+        $cls = 'spoof'
+    } elseif ($addr -match '^(240\.|198\.18\.|198\.19\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.)') {
+        $cls = 'fake'
+    } elseif (Test-Real $addr $s.Kind) {
+        $cls = 'real'
+    } else {
+        $cls = 'other'
+    }
+    $dnsClasses[$s.Dom] = $cls
+    switch ($cls) {
+        'spoof' { Line ($s.Dom + ' → ' + $addr + ' — подмена DNS провайдером, это не сервер сервиса'); $dnsProblems += ' ' + $s.Dom }
+        'fake'  { Line ($s.Dom + ' → ' + $addr + ' — внутренний адрес VPN-приложения (fake-IP), так и должно быть') }
+        'real'  { Line ($s.Dom + ' → ' + $addr + ' — настоящий адрес сервиса') }
+        'other' { Line ($s.Dom + ' → ' + $addr + ' — ВНИМАНИЕ: не похоже на сервер сервиса, вероятна подмена DNS'); $dnsProblems += ' ' + $s.Dom }
+        default { Line ($s.Dom + ' → DNS не отдал адрес'); $dnsProblems += ' ' + $s.Dom }
+    }
 }
+$dnsAddr = Resolve-Name 'chatgpt.com'
+$dnsClass = $dnsClasses['chatgpt.com']
 
 # --- 5. Файл hosts ----------------------------------------------------------
 Section '5. Файл hosts (непустые строки без комментариев)'
@@ -236,49 +260,56 @@ if ($ipv4 -and $exitIp -and ($ipv4 -ne $exitIp)) {
     Line 'Адреса разные: часть трафика идёт мимо туннеля. Так бывает по правилу «РФ-сайты напрямую» — это не ошибка.'
 }
 
-# --- 7. Ответ chatgpt.com ---------------------------------------------------
-Section '7. Ответ chatgpt.com'
+# --- 7. Ответ ИИ-сервисов --------------------------------------------------
+Section '7. Ответ ИИ-сервисов: ChatGPT, Claude, Gemini, NotebookLM'
+$ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
 
-function Test-ChatGpt {
-    param([string]$ResolveTarget = '')
-    $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+function Test-Site {
+    param([string]$Url, [string]$ResolveTarget = '')
     if (Have 'curl.exe') {
         $cargs = @('-s', '-o', 'NUL', '--max-time', '20', '-A', $ua)
         if ($ResolveTarget) { $cargs += @('--resolve', $ResolveTarget) }
-        $cargs += @('-w', 'код=%{http_code} время=%{time_total}с адрес=%{remote_ip}', 'https://chatgpt.com/')
+        $cargs += @('-w', 'код=%{http_code} время=%{time_total}с адрес=%{remote_ip}', $Url)
         $out = & curl.exe @cargs 2>$null
         return ((($out | Out-String).Trim()))
     }
     try {
-        $r = Invoke-WebRequest -Uri 'https://chatgpt.com/' -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+        $r = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
         return ('код=' + [int]$r.StatusCode)
     } catch {
-        if ($_.Exception.Response) {
-            return ('код=' + [int]$_.Exception.Response.StatusCode)
-        }
+        if ($_.Exception.Response) { return ('код=' + [int]$_.Exception.Response.StatusCode) }
         return 'запрос не прошёл'
     }
 }
 
-$chatIf = ''
-try {
-    $r = Find-NetRoute -RemoteIPAddress '104.18.32.47' -ErrorAction Stop | Select-Object -First 1
-    if ($r) {
-        $ad = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue
-        if ($ad) { $chatIf = $ad.Name + ' / ' + $ad.InterfaceDescription }
-    }
-} catch { }
+function Get-SiteIf([string]$Ip) {
+    try {
+        $r = Find-NetRoute -RemoteIPAddress $Ip -ErrorAction Stop | Select-Object -First 1
+        if ($r) {
+            $ad = Get-NetAdapter -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue
+            if ($ad) { return ($ad.Name + ' / ' + $ad.InterfaceDescription) }
+        }
+    } catch { }
+    return ''
+}
+
+$chatIf = Get-SiteIf '104.18.32.47'
 Line ("Маршрут до chatgpt.com идёт через: " + $(if ($chatIf) { $chatIf } else { 'не определён' }))
 
-$resName = Test-ChatGpt ''
-Line ("Запрос по имени: " + $(if ($resName) { $resName } else { 'запрос не прошёл' }))
-$chatCode = ''
-if ($resName -match 'код=(\d+)') { $chatCode = $Matches[1] }
-
-$resIp = Test-ChatGpt '--resolve chatgpt.com:443:104.18.32.47'
-Line ("Запрос к настоящему адресу 104.18.32.47: " + $(if ($resIp) { $resIp } else { 'запрос не прошёл' }))
-$codeIp = ''
-if ($resIp -match 'код=(\d+)') { $codeIp = $Matches[1] }
+# По каждому сервису две проверки: по имени и по настоящему адресу.
+$aiBad = ''
+foreach ($s in $services) {
+    $resName = Test-Site ('https://' + $s.Dom + '/')
+    $code = ''
+    if ($resName -match 'код=(\d+)') { $code = $Matches[1] }
+    $resIp = Test-Site ('https://' + $s.Dom + '/') ($s.Dom + ':443:' + $s.Ref)
+    $codeIp = ''
+    if ($resIp -match 'код=(\d+)') { $codeIp = $Matches[1] }
+    Line ($s.Dom + ' — ' + $(if ($resName) { $resName } else { 'запрос не прошёл' }))
+    Line ('    по настоящему адресу ' + $s.Ref + ': ' + $(if ($resIp) { $resIp } else { 'запрос не прошёл' }))
+    $ok = ($code -in @('200', '204', '301', '302', '403')) -and ($codeIp -in @('200', '204', '301', '302', '403'))
+    if (-not $ok) { $aiBad += ' ' + $s.Dom }
+}
 
 Line ("Время системы: " + (Get-Date).ToString('dd.MM.yyyy HH:mm:ss'))
 
@@ -299,11 +330,14 @@ if ($exitLoc -eq 'RU') {
     Line 'Выход в интернет не определён.'
 }
 switch ($dnsClass) {
-    'fake'       { Line 'Адрес ChatGPT внутренний (fake-IP приложения): это норма, приложение само ведёт трафик в туннель.' }
-    'spoof'      { Line 'Адрес ChatGPT подменяет провайдер: соединение идёт не на сервер ChatGPT.' }
-    'cloudflare' { Line 'DNS отдаёт настоящий адрес ChatGPT.' }
-    'other'      { Line 'Адрес ChatGPT не похож на настоящий: вероятна подмена DNS на стороне провайдера или роутера.' }
-    default      { Line 'DNS не отдал адрес ChatGPT.' }
+    'fake'  { Line 'Адрес ChatGPT внутренний (fake-IP приложения): это норма, приложение само ведёт трафик в туннель.' }
+    'spoof' { Line 'Адрес ChatGPT подменяет провайдер: соединение идёт не на сервер ChatGPT.' }
+    'real'  { Line 'DNS отдаёт настоящий адрес ChatGPT.' }
+    'other' { Line 'Адрес ChatGPT не похож на настоящий: вероятна подмена DNS на стороне провайдера или роутера.' }
+    default { Line 'DNS не отдал адрес ChatGPT.' }
+}
+if ($dnsProblems) {
+    Line ('Подмена или отсутствие DNS у сервисов:' + $dnsProblems + ' — проверять DNS в роутере и на компьютере.')
 }
 if ($chatIf) {
     if ($chatIf -match 'VPN|WireGuard|Wintun|TAP|TUN|OpenVPN|Amnezia|Happ|Incy|sing-box|Xray|Outline') {
@@ -314,16 +348,13 @@ if ($chatIf) {
 } else {
     Line 'Маршрут до ChatGPT не определён.'
 }
-if ($chatCode -eq '200' -or $chatCode -eq '403') {
-    if ($codeIp -eq '200' -or $codeIp -eq '403') {
-        Line 'ChatGPT доступен и по имени, и по настоящему адресу: сеть и DNS в порядке, причина в браузере.'
-    } else {
-        Line ('По имени сайт отвечает (код ' + $chatCode + '), по настоящему адресу — нет. Разбирать DNS и правило маршрута.')
-    }
-} elseif (-not $chatCode -or $chatCode -eq '000') {
-    Line 'Сайт ChatGPT не ответил ни по имени, ни по адресу: соединение не устанавливается.'
+if ($aiBad) {
+    Line ('Не отвечают по имени и по настоящему адресу:' + $aiBad + ' — причина в DNS, маршруте или канале, а не в браузере.')
 } else {
-    Line ('Сайт ChatGPT ответил кодом ' + $chatCode + '.')
+    Line 'Все ИИ-сервисы отвечают и по имени, и по настоящему адресу: сеть и DNS в порядке, причина в браузере или в аккаунте.'
+}
+if ($aiBad -match 'gemini|notebooklm' -and $exitLoc -ne 'US') {
+    Line ('Gemini и NotebookLM работают только через США: сейчас выход ' + $(if ($exitLoc) { $exitLoc } else { 'не определён' }) + ' — сменить локацию на USA.')
 }
 if ($proxyState -ne 'не включён') {
     Line ($proxyState + ' — приложения могут обходить VPN через этот прокси.')
