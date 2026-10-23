@@ -17,22 +17,22 @@
 Команда для копирования (одна строка):
 
 ```
-curl -fsSL https://cdn.jsdelivr.net/gh/VladimirNNOV/vsemdostup-support@main/collect_macos_diag.command | bash
+curl -fsSL https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/collect_macos_diag.command | bash
 ```
 
 Пароль администратора не нужен. Скрипт ничего не устанавливает.
 
-Резервная ссылка, если эта не откроется:
+Резервная ссылка — тот же файл, закреплённый по версии:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/collect_macos_diag.command | bash
+curl -fsSL https://cdn.jsdelivr.net/gh/VladimirNNOV/vsemdostup-support@2f3a5b3d7f3abbab78fc6b155da597330da27ac9/collect_macos_diag.command | bash
 ```
 
 ## Если команда не сработала
 
 - **Терминал пишет «command not found: curl»** — macOS 10.14 и старше. Откройте страницу
-  `https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/collect_macos_diag.command`,
-  нажмите «Сохранить как…», затем в Терминале выполните `bash ~/Downloads/collect_macos_diag.command`.
+  `https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/collect_macos_diag.command`, нажмите «Сохранить как…», затем в Терминале выполните
+  `bash ~/Downloads/collect_macos_diag.command`.
 - **Терминал пишет «Operation not permitted»** — напишите в поддержку, пришлите скриншот окна.
 - **Отчёт короче 9 разделов** — сеть оборвалась. Запустите команду ещё раз.
 - **Ничего не помогает** — пришлите скриншот окна Терминала и напишите, на каком шаге остановились.
