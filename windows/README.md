@@ -6,29 +6,25 @@
 
 1. Нажмите `Win`, наберите `PowerShell`, нажмите `Enter`. Откроется синее окно.
 2. Скопируйте строку ниже целиком и вставьте её в окно. Вставка: правой кнопкой мыши.
-3. Нажмите `Enter` и подождите 20–60 секунд.
+3. Нажмите `Enter` и подождите 20–60 секунд. Строка скачает файл во временную папку и запустит его.
 4. На экране появится отчёт из 8 разделов.
-5. Выделите весь текст: `Ctrl + A`. Скопируйте: `Ctrl + C` (или `Enter` в Windows Terminal).
+5. Выделите весь текст: `Ctrl + A`. Скопируйте: `Ctrl + C`.
 6. Вставьте текст в чат поддержки. Или сделайте снимок окна: `Win + Shift + S`.
 7. Закройте окно: `Alt + F4`.
 
-Команда для копирования:
+Команда для копирования (одна строка):
 
 ```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm 'https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/windows/collect_windows_diag.ps1' | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr -UseBasicParsing 'https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/windows/collect_windows_diag.ps1' -OutFile $env:TEMP\vsem-diag.ps1; & $env:TEMP\vsem-diag.ps1"
 ```
 
-Если эта строка не сработала, используйте вторую (скачивает файл во временную папку и запускает):
+Если PowerShell пишет «не удаётся загрузить файл» — проверьте интернет и запустите строку ещё раз.
 
-```
-powershell -NoProfile -ExecutionPolicy Bypass -Command "curl.exe -fsSL 'https://raw.githubusercontent.com/VladimirNNOV/vsemdostup-support/main/windows/collect_windows_diag.ps1' -o $env:TEMP\vsem-diag.ps1; & $env:TEMP\vsem-diag.ps1"
-```
+## Почему не «одной командой в конвейере»
 
-## Если команда не сработала
-
-- **«выполнение сценариев отключено в этой системе»** — используйте вторую команду выше.
-- **Красный текст с ошибкой** — пришлите скриншот окна в поддержку.
-- **Окно закрылось сразу** — откройте PowerShell заново и запустите вторую команду.
+Файл содержит русский текст. При запуске через конвейер (`irm … | iex`) PowerShell 5.1
+спотыкается на служебном символе в начале файла и печатает ошибку про `#`. Поэтому клиент
+скачивает файл во временную папку и запускает его как файл: тогда русский текст читается верно.
 
 ## Что показывает отчёт
 
@@ -45,6 +41,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "curl.exe -fsSL 'https://
 
 - Работает только на Windows; на другой системе завершается с сообщением.
 - Личные файлы, историю браузера и ключи подписки не читает.
-- Для проверки кодов ответа используется `curl.exe` (входит в Windows 10 и 11). Если его нет,
-  берётся встроенный веб-запрос PowerShell.
+- Для кодов ответа используется `curl.exe` (входит в Windows 10 и 11). Если его нет, берётся
+  встроенный веб-запрос PowerShell.
 - Исходящие запросы: `cloudflare.com/cdn-cgi/trace`, `api.ipify.org`, `api6.ipify.org`, `chatgpt.com`.
