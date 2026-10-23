@@ -100,7 +100,7 @@ if have scutil; then
     [ -n "$nc" ] && printf '%s\n' "$nc" | while IFS= read -r l; do line "$l"; done
 fi
 if have pgrep; then
-    procs=$(pgrep -fl 'happ|incy|xray|sing-box|wireguard|warp|xray-tun|v2ray' 2>/dev/null | head -"$LIMIT" | cut -c1-90)
+    procs=$(pgrep -fl 'happ|incy|xray|sing-box|wireguard|warp|xray-tun|v2ray' 2>/dev/null | head -"$LIMIT" | cut -c1-70 | tr '\n' ';')
     line "Процессы VPN: ${procs:-не найдены}"
 fi
 
