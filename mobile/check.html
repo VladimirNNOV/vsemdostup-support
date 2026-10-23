@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VsemDOSTUP — проверка ИИ-сервисов на телефоне</title>
+<style>
+  :root {
+    --fg: #14161a; --muted: #5b6470; --line: #dfe3e8; --bg: #ffffff;
+    --ok: #1a7f37; --bad: #b42318; --warn: #8a5b00; --card: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #e8eaed; --muted: #9aa3ad; --line: #2c3138; --bg: #14161a;
+            --ok: #4ac26b; --bad: #ff8a80; --warn: #e3b341; --card: #1b1f24; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 40px; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .lead { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  .row {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 11px 0; border-bottom: 1px solid var(--line);
+  }
+  .row:last-child { border-bottom: 0; }
+  .k { color: var(--muted); flex: 0 0 46%; }
+  .v { text-align: right; word-break: break-word; font-variant-numeric: tabular-nums; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin: 0 0 16px; }
+  h2 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  button {
+    font: inherit; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--card); color: var(--fg); margin: 0 8px 8px 0;
+  }
+  button:active { opacity: .7; }
+  #report {
+    width: 100%; min-height: 180px; background: var(--card); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    font: 13px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .hint { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+
+<h1>Проверка ИИ-сервисов</h1>
+<p class="lead">Страница только читает данные о соединении. Ничего не устанавливает, ничего не меняет, файлов не создаёт.</p>
+
+<h2>Соединение</h2>
+<div class="card" id="net">
+  <div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div>
+</div>
+
+<h2>Сервисы</h2>
+<div class="card" id="svc">
+  <div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div>
+</div>
+
+<h2>Что это значит</h2>
+<div class="card" id="verdict">
+  <div class="row"><span class="k">Ждём результаты…</span><span class="v"></span></div>
+</div>
+
+<h2>Отчёт для поддержки</h2>
+<button id="again" type="button">Проверить снова</button>
+<button id="copy" type="button">Скопировать отчёт</button>
+<p><textarea id="report" readonly>идёт проверка…</textarea></p>
+<p class="hint">Скопируйте текст кнопкой выше и пришлите в чат поддержки. Если копирование не сработало — выделите текст в поле и скопируйте вручную.</p>
+
+<script>
+(function () {
+  "use strict";
+
+  var SERVICES = [
+    { name: "ChatGPT",    url: "https://chatgpt.com/" },
+    { name: "Claude",     url: "https://claude.ai/" },
+    { name: "Gemini",     url: "https://gemini.google.com/" },
+    { name: "NotebookLM", url: "https://notebooklm.google.com/" }
+  ];
+  var TIMEOUT_MS = 12000;
+  var result = { time: "", exit: null, ipv4: "", ipv6: "", services: [], errors: [] };
+
+  function el(id) { return document.getElementById(id); }
+
+  function row(k, v, cls) {
+    return '<div class="row"><span class="k">' + k + '</span><span class="v' +
+      (cls ? " " + cls : "") + '">' + v + '</span></div>';
+  }
+
+  function esc(s) {
+    return String(s === undefined || s === null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function withTimeout(promise, ms) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; resolve({ timedOut: true }); }
+      }, ms);
+      promise.then(function (v) {
+        if (!done) { done = true; clearTimeout(timer); resolve({ value: v }); }
+      }, function (e) {
+        if (!done) { done = true; clearTimeout(timer); resolve({ error: e }); }
+      });
+    });
+  }
+
+  function readText(url) {
+    return withTimeout(
+      fetch(url, { mode: "cors", cache: "no-store" }).then(function (r) { return r.text(); }),
+      TIMEOUT_MS
+    );
+  }
+
+  function trace() {
+    return readText("https://www.cloudflare.com/cdn-cgi/trace").then(function (res) {
+      if (!res.value) { return res; }
+      var out = {};
+      res.value.split("\n").forEach(function (line) {
+        var i = line.indexOf("=");
+        if (i > 0) { out[line.slice(0, i).trim()] = line.slice(i + 1).trim(); }
+      });
+      return { value: out };
+    });
+  }
+
+  function probe(url) {
+    return withTimeout(
+      fetch(url, { mode: "no-cors", cache: "no-store", redirect: "follow" }).then(function () { return true; }),
+      TIMEOUT_MS
+    );
+  }
+
+  function fmtTime() {
+    var d = new Date();
+    function p(n) { return (n < 10 ? "0" : "") + n; }
+    return d.getFullYear() + "." + p(d.getMonth() + 1) + "." + p(d.getDate()) + " " +
+      p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  function run() {
+    result.time = fmtTime();
+    el("net").innerHTML = row("Проверка идёт…", "");
+    el("svc").innerHTML = row("Проверка идёт…", "");
+    el("verdict").innerHTML = row("Ждём результаты…", "");
+    el("report").value = "идёт проверка…";
+
+    var t = trace();
+    var v4 = readText("https://api.ipify.org");
+    var v6 = readText("https://api6.ipify.org");
+    var probes = SERVICES.map(function (s) {
+      return probe(s.url).then(function (r) {
+        var state;
+        if (r.value) { state = "связь есть"; }
+        else if (r.timedOut) { state = "нет ответа за " + (TIMEOUT_MS / 1000) + " с"; }
+        else { state = "связи нет"; }
+        return { name: s.name, url: s.url, state: state, ok: !!r.value };
+      });
+    });
+
+    Promise.all([t, v4, v6, Promise.all(probes)]).then(function (all) {
+      var tr = all[0].value || null;
+      var ipv4 = (all[1].value || "").trim();
+      var ipv6 = (all[2].value || "").trim();
+      var services = all[3];
+
+      if (all[0].error || all[0].timedOut) { result.errors.push("запрос trace не прошёл"); }
+      result.exit = tr ? { ip: tr.ip || "", loc: tr.loc || "", http: tr.http || "", warp: tr.warp || "" } : null;
+      result.ipv4 = ipv4;
+      result.ipv6 = ipv6;
+      result.services = services;
+
+      var netHtml = "";
+      netHtml += row("Адрес выхода", tr && tr.ip ? esc(tr.ip) : '<span class="bad">не определён</span>');
+      netHtml += row("Страна выхода", tr && tr.loc ? esc(tr.loc) : "не определена",
+        tr && tr.loc === "US" ? "ok" : "");
+      netHtml += row("Протокол", tr && tr.http ? esc(tr.http) : "не определён");
+      netHtml += row("WARP", tr && tr.warp ? esc(tr.warp) : "нет данных");
+      netHtml += row("IPv4", ipv4 ? esc(ipv4) : "нет ответа");
+      netHtml += row("IPv6", ipv6 ? esc(ipv6) + " — есть выход по IPv6" : "нет ответа (IPv6 не используется)",
+        ipv6 ? "warn" : "");
+      el("net").innerHTML = netHtml;
+
+      var svcHtml = "";
+      services.forEach(function (s) {
+        svcHtml += row(esc(s.name), esc(s.state), s.ok ? "ok" : "bad");
+      });
+      el("svc").innerHTML = svcHtml;
+
+      var vHtml = "";
+      var badList = services.filter(function (s) { return !s.ok; }).map(function (s) { return s.name; });
+      if (tr && tr.loc === "US") {
+        vHtml += row("Страна", "выход из США — как нужно для Gemini и NotebookLM", "ok");
+      } else if (tr && tr.loc) {
+        vHtml += row("Страна", "выход не из США (" + esc(tr.loc) + "): Gemini и NotebookLM работают только через США", "warn");
+      }
+      if (badList.length === 0) {
+        vHtml += row("Сервисы", "все четыре отвечают — дело не в сети, проверяйте вход в аккаунт и браузер", "ok");
+      } else {
+        vHtml += row("Сервисы", "нет связи: " + esc(badList.join(", ")), "bad");
+      }
+      if (ipv6) {
+        vHtml += row("IPv6", "работает и выходит с адреса " + esc(ipv6) + " — часть трафика может идти мимо VPN", "warn");
+      }
+      el("verdict").innerHTML = vHtml;
+
+      var lines = [];
+      lines.push("VsemDOSTUP — проверка ИИ-сервисов на телефоне");
+      lines.push("Дата и время: " + result.time);
+      lines.push("Адрес выхода: " + (tr && tr.ip ? tr.ip : "не определён"));
+      lines.push("Страна выхода: " + (tr && tr.loc ? tr.loc : "не определена"));
+      lines.push("Протокол: " + (tr && tr.http ? tr.http : "не определён"));
+      lines.push("IPv4: " + (ipv4 || "нет ответа"));
+      lines.push("IPv6: " + (ipv6 || "нет ответа (IPv6 не используется)"));
+      lines.push("Проверка сервисов (есть ли связь с сайтом):");
+      services.forEach(function (s) { lines.push("  " + s.name + " (" + s.url + "): " + s.state); });
+      lines.push("Выводы:");
+      if (tr && tr.loc === "US") {
+        lines.push("  Страна выхода США — как нужно для Gemini и NotebookLM.");
+      } else if (tr && tr.loc) {
+        lines.push("  Страна выхода не США — Gemini и NotebookLM работают только через США.");
+      }
+      if (badList.length === 0) {
+        lines.push("  Все четыре сервиса отвечают: сеть в порядке, причина в браузере или аккаунте.");
+      } else {
+        lines.push("  Нет связи: " + badList.join(", ") + " — причина в DNS, в выборе локации или в канале.");
+      }
+      if (ipv6) { lines.push("  IPv6 работает: часть трафика может идти мимо VPN."); }
+      lines.push("Границы: страница не показывает адреса DNS и имя туннеля — для этого нужен скрипт на компьютере.");
+      el("report").value = lines.join("\n");
+    });
+  }
+
+  el("again").addEventListener("click", run);
+  el("copy").addEventListener("click", function () {
+    var text = el("report").value;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(function () { el("report").select(); });
+    } else {
+      el("report").select();
+    }
+  });
+
+  run();
+})();
+</script>
+</body>
+</html>
