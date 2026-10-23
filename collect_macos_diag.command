@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # Диагностика сети на macOS для поддержки VsemDOSTUP.
 #
-# Что делает: только ЧИТАЕТ настройки и делает 2 сетевых запроса.
+# Что делает: только ЧИТАЕТ настройки и делает до 6 сетевых GET-запросов (все к публичным адресам).
 # Ничего не меняет, ничего не устанавливает, файлов не создаёт, секретов не печатает.
 #
 # Как запустить:
@@ -61,7 +61,7 @@ case "$ROUTE_IF" in
 esac
 if have ifconfig; then
     line "Активные туннели utun: $(ifconfig 2>/dev/null | grep -c '^utun[0-9]*:')"
-    ifconfig 2>/dev/null | grep -E '^(utun[0-9]+|en[0-9]+):' | head -"$LIMIT" | while IFS= read -r l; do line "$l"; done
+    ifconfig 2>/dev/null | grep -E '^utun[0-9]+:|^'"$ROUTE_IF"':' | head -"$LIMIT" | while IFS= read -r l; do line "$l"; done
 fi
 
 # --- 4. DNS ----------------------------------------------------------------
@@ -76,14 +76,13 @@ if have dscacheutil; then
 fi
 case "$DNS_ADDR" in
     *8.47.69.*|*8.6.112.*) line "ВНИМАНИЕ: это адрес-заглушка провайдера (подмена DNS), а не настоящий сервер ChatGPT." ;;
+    *240.*|*198.18.*|*198.19.*|*10.*|*192.168.*|*172.1[6-9].*|*172.2[0-9].*|*172.3[01].*|*127.*)
+        line "Адрес $DNS_ADDR — внутренний адрес VPN-приложения (fake-IP), а не сервер ChatGPT. Так и должно быть: приложение само направляет трафик в туннель." ;;
+    '') line "DNS не отдал адрес для chatgpt.com." ;;
 esac
 
 # --- 5. Что установлено и запущено -----------------------------------------
 hdr "5. VPN-приложения и расширения"
-if have systemextensionsctl; then
-    cnt=$(systemextensionsctl list 2>/dev/null | grep -ciE 'vpn|network')
-    line "Системных сетевых расширений (VPN): $cnt"
-fi
 apps=""
 if [ -d /Applications ]; then
     for app in /Applications/*; do
@@ -134,16 +133,35 @@ IPV4=$(curl -s --max-time 12 https://api.ipify.org 2>/dev/null)
 IPV6=$(curl -s --max-time 12 https://api6.ipify.org 2>/dev/null)
 IPV4=$(printf '%s' "$IPV4" | tr -d ' \n\r')
 IPV6=$(printf '%s' "$IPV6" | tr -d ' \n\r')
-line "IPv4 по запросу к api.ipify.org: ${IPV4:-нет ответа}"
+line "IPv4 по запросу к api.ipify.org: ${IPV4:-нет ответа} (может идти напрямую по правилу «РФ-сайты»)"
 line "IPv6 по запросу к api6.ipify.org: ${IPV6:-нет ответа (IPv6 не используется)}"
+if [ -n "${IPV4:-}" ] && [ -n "${EXIT_IP:-}" ] && [ "$IPV4" != "$EXIT_IP" ]; then
+    line "Адреса разные: часть трафика идёт мимо туннеля. Так бывает по правилу «РФ-сайты напрямую» — это не ошибка."
+fi
 
 # --- 8. Проверка ChatGPT ---------------------------------------------------
 hdr "8. Ответ chatgpt.com"
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+
+# 8.1. Обычный запрос по имени: какой интерфейс выбирает система и что отвечает сервер.
+CG_IF=$(route -n get chatgpt.com 2>/dev/null | awk '/interface:/{print $2}')
+line "Маршрут до chatgpt.com идёт через: ${CG_IF:-не определён}"
 RES=$(curl -s -o /dev/null --max-time 20 -A "$UA" \
       -w 'код=%{http_code} время=%{time_total}с адрес=%{remote_ip}' https://chatgpt.com/ 2>/dev/null)
 CHATGPT_CODE=$(printf '%s' "$RES" | awk -F'[= ]' '/код=/{print $2}')
-line "${RES:-запрос не прошёл}"
+line "Запрос по имени: ${RES:-запрос не прошёл}"
+
+# 8.2. Тот же запрос к НАСТОЯЩЕМУ адресу ChatGPT: так проверяется, виноват ли DNS.
+RES_IP=$(curl -s -o /dev/null --max-time 20 -A "$UA" --resolve chatgpt.com:443:104.18.32.47 \
+      -w 'код=%{http_code} время=%{time_total}с' https://chatgpt.com/ 2>/dev/null)
+line "Запрос к настоящему адресу 104.18.32.47: ${RES_IP:-запрос не прошёл}"
+
+# 8.3. Текст ошибки curl, если соединение не встало: там видна причина.
+ERR=$(curl -sS -o /dev/null --max-time 20 -A "$UA" https://chatgpt.com/ 2>&1 >/dev/null | head -2)
+[ -n "$ERR" ] && line "Ошибка curl: $(printf '%s' "$ERR" | tr '\n' ' ')"
+
+# 8.4. Часы системы: сбитое время ломает проверку сертификата.
+line "Время системы: $(date '+%d.%m.%Y %H:%M:%S %Z')"
 
 # --- 9. Что это значит -----------------------------------------------------
 hdr "9. Что это значит"
@@ -159,17 +177,28 @@ case "${EXIT_LOC:-}" in
 esac
 case "$DNS_ADDR" in
     *8.47.69.*|*8.6.112.*) line "Адрес ChatGPT подменяет провайдер: соединение идёт не на сервер ChatGPT." ;;
+    *240.*|*198.18.*|*198.19.*|*10.*|*192.168.*|*172.1[6-9].*|*172.2[0-9].*|*172.3[01].*|*127.*)
+        line "Адрес ChatGPT внутренний (fake-IP приложения): это норма, приложение само ведёт трафик в туннель." ;;
     '') line "DNS не отдал адрес ChatGPT." ;;
     *)  line "DNS отдаёт обычный адрес ChatGPT." ;;
+esac
+case "${CG_IF:-}" in
+    utun*) line "Запрос к ChatGPT система отправляет в туннель ($CG_IF)." ;;
+    '')    line "Маршрут до ChatGPT не определён." ;;
+    *)     line "Запрос к ChatGPT система отправляет НЕ в туннель, а через $CG_IF — вот причина отказа." ;;
+esac
+case "${CHATGPT_CODE:-}" in
+    200|403)
+        case "$(printf '%s' "$RES_IP" | awk -F'[= ]' '/код=/{print $2}')" in
+            200|403) line "ChatGPT доступен и по имени, и по настоящему адресу: сеть и DNS в порядке, причина в браузере." ;;
+            *)       line "По имени сайт отвечает (код $CHATGPT_CODE), по настоящему адресу — нет. Разбирать DNS и правило маршрута." ;;
+        esac ;;
+    000|'') line "Сайт ChatGPT не ответил ни по имени, ни по адресу: соединение не устанавливается." ;;
+    *)      line "Сайт ChatGPT ответил кодом $CHATGPT_CODE." ;;
 esac
 case "$PROXY_STATE" in
     "не включён") line "Системный прокси не включён." ;;
     *) line "$PROXY_STATE — приложения могут обходить VPN через этот прокси." ;;
-esac
-case "${CHATGPT_CODE:-}" in
-    200|403) line "Сайт ChatGPT отвечает (код $CHATGPT_CODE) — сеть до него доходит." ;;
-    000|'') line "Сайт ChatGPT не ответил: соединение не устанавливается." ;;
-    *)      line "Сайт ChatGPT ответил кодом $CHATGPT_CODE." ;;
 esac
 if printf '%s\n' "${hosts:-}" | grep -qi 'chatgpt\|openai'; then
     line "В файле hosts есть записи для ChatGPT — это может блокировать сайт."
