@@ -26,18 +26,19 @@
     padding: 11px 0; border-bottom: 1px solid var(--line);
   }
   .row:last-child { border-bottom: 0; }
-  .k { color: var(--muted); flex: 0 0 46%; }
+  .k { color: var(--muted); flex: 0 0 44%; }
   .v { text-align: right; word-break: break-word; font-variant-numeric: tabular-nums; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px 14px; margin: 0 0 16px; }
   h2 { font-size: 15px; margin: 22px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .muted { color: var(--muted); }
   button {
     font: inherit; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--line);
     background: var(--card); color: var(--fg); margin: 0 8px 8px 0;
   }
   button:active { opacity: .7; }
   #report {
-    width: 100%; min-height: 180px; background: var(--card); color: var(--fg);
+    width: 100%; min-height: 200px; background: var(--card); color: var(--fg);
     border: 1px solid var(--line); border-radius: 12px; padding: 12px;
     font: 13px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word;
@@ -51,19 +52,16 @@
 <p class="lead">Страница только читает данные о соединении. Ничего не устанавливает, ничего не меняет, файлов не создаёт.</p>
 
 <h2>Соединение</h2>
-<div class="card" id="net">
-  <div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div>
-</div>
+<div class="card" id="net"><div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div></div>
 
-<h2>Сервисы</h2>
-<div class="card" id="svc">
-  <div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div>
-</div>
+<h2>Адреса сервисов (защищённый канал)</h2>
+<div class="card" id="dns"><div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div></div>
+
+<h2>Ответ сервисов</h2>
+<div class="card" id="svc"><div class="row"><span class="k">Проверка идёт…</span><span class="v"></span></div></div>
 
 <h2>Что это значит</h2>
-<div class="card" id="verdict">
-  <div class="row"><span class="k">Ждём результаты…</span><span class="v"></span></div>
-</div>
+<div class="card" id="verdict"><div class="row"><span class="k">Ждём результаты…</span><span class="v"></span></div></div>
 
 <h2>Отчёт для поддержки</h2>
 <button id="again" type="button">Проверить снова</button>
@@ -75,164 +73,197 @@
 (function () {
   "use strict";
 
+  // Домен, название и признак владельца сети: по нему отличаем настоящий адрес от подмены.
   var SERVICES = [
-    { name: "ChatGPT",    url: "https://chatgpt.com/" },
-    { name: "Claude",     url: "https://claude.ai/" },
-    { name: "Gemini",     url: "https://gemini.google.com/" },
-    { name: "NotebookLM", url: "https://notebooklm.google.com/" }
+    { name: "ChatGPT",    dom: "chatgpt.com",           kind: "chatgpt" },
+    { name: "Claude",     dom: "claude.ai",             kind: "claude"  },
+    { name: "Gemini",     dom: "gemini.google.com",     kind: "google"  },
+    { name: "NotebookLM", dom: "notebooklm.google.com", kind: "google"  }
   ];
   var TIMEOUT_MS = 12000;
-  var result = { time: "", exit: null, ipv4: "", ipv6: "", services: [], errors: [] };
+  var OWNER = {
+    chatgpt: /^(104\.(1[6-9]|2[0-9]|3[01])\.|172\.(6[4-9]|7[01])\.|162\.159\.|188\.114\.)/,
+    claude:  /^160\.79\.104\./,
+    google:  /^(142\.25[0-9]\.|172\.217\.|216\.58\.|216\.239\.|172\.253\.|74\.125\.|108\.177\.|209\.85\.|64\.233\.|173\.194\.)/
+  };
 
   function el(id) { return document.getElementById(id); }
-
-  function row(k, v, cls) {
-    return '<div class="row"><span class="k">' + k + '</span><span class="v' +
-      (cls ? " " + cls : "") + '">' + v + '</span></div>';
-  }
-
   function esc(s) {
     return String(s === undefined || s === null ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-
-  function withTimeout(promise, ms) {
-    return new Promise(function (resolve) {
-      var done = false;
-      var timer = setTimeout(function () {
-        if (!done) { done = true; resolve({ timedOut: true }); }
-      }, ms);
-      promise.then(function (v) {
-        if (!done) { done = true; clearTimeout(timer); resolve({ value: v }); }
-      }, function (e) {
-        if (!done) { done = true; clearTimeout(timer); resolve({ error: e }); }
-      });
-    });
+  function row(k, v, cls) {
+    return '<div class="row"><span class="k">' + k + '</span><span class="v' +
+      (cls ? " " + cls : "") + '">' + v + '</span></div>';
   }
-
-  function readText(url) {
-    return withTimeout(
-      fetch(url, { mode: "cors", cache: "no-store" }).then(function (r) { return r.text(); }),
-      TIMEOUT_MS
-    );
-  }
-
-  function trace() {
-    return readText("https://www.cloudflare.com/cdn-cgi/trace").then(function (res) {
-      if (!res.value) { return res; }
-      var out = {};
-      res.value.split("\n").forEach(function (line) {
-        var i = line.indexOf("=");
-        if (i > 0) { out[line.slice(0, i).trim()] = line.slice(i + 1).trim(); }
-      });
-      return { value: out };
-    });
-  }
-
-  function probe(url) {
-    return withTimeout(
-      fetch(url, { mode: "no-cors", cache: "no-store", redirect: "follow" }).then(function () { return true; }),
-      TIMEOUT_MS
-    );
-  }
-
   function fmtTime() {
     var d = new Date();
     function p(n) { return (n < 10 ? "0" : "") + n; }
     return d.getFullYear() + "." + p(d.getMonth() + 1) + "." + p(d.getDate()) + " " +
       p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
   }
+  function withTimeout(promise, ms) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var t = setTimeout(function () { if (!done) { done = true; resolve({ timedOut: true }); } }, ms);
+      promise.then(function (v) { if (!done) { done = true; clearTimeout(t); resolve({ value: v }); } },
+                   function (e) { if (!done) { done = true; clearTimeout(t); resolve({ error: e }); } });
+    });
+  }
+  function readText(url, headers) {
+    var opts = { mode: "cors", cache: "no-store" };
+    if (headers) { opts.headers = headers; }
+    return withTimeout(fetch(url, opts).then(function (r) { return r.text(); }), TIMEOUT_MS);
+  }
+  function touch(url) {
+    // Ответ читать не нужно: важно только, установилось ли соединение.
+    return withTimeout(fetch(url, { mode: "no-cors", cache: "no-store", redirect: "follow" })
+      .then(function () { return true; }), TIMEOUT_MS);
+  }
+
+  // Настоящие адреса берём по защищённому каналу (DoH): провайдер не может их подменить.
+  function doh(dom) {
+    var url = "https://cloudflare-dns.com/dns-query?name=" + encodeURIComponent(dom) + "&type=A";
+    return readText(url, { accept: "application/dns-json" }).then(function (res) {
+      if (!res.value) { return []; }
+      try {
+        var data = JSON.parse(res.value);
+        return (data.Answer || []).filter(function (a) { return a.type === 1; })
+          .map(function (a) { return a.data; });
+      } catch (e) { return []; }
+    });
+  }
 
   function run() {
-    result.time = fmtTime();
+    var started = fmtTime();
     el("net").innerHTML = row("Проверка идёт…", "");
+    el("dns").innerHTML = row("Проверка идёт…", "");
     el("svc").innerHTML = row("Проверка идёт…", "");
     el("verdict").innerHTML = row("Ждём результаты…", "");
     el("report").value = "идёт проверка…";
 
-    var t = trace();
-    var v4 = readText("https://api.ipify.org");
-    var v6 = readText("https://api6.ipify.org");
-    var probes = SERVICES.map(function (s) {
-      return probe(s.url).then(function (r) {
-        var state;
-        if (r.value) { state = "связь есть"; }
-        else if (r.timedOut) { state = "нет ответа за " + (TIMEOUT_MS / 1000) + " с"; }
-        else { state = "связи нет"; }
-        return { name: s.name, url: s.url, state: state, ok: !!r.value };
+    var traceP = readText("https://www.cloudflare.com/cdn-cgi/trace").then(function (res) {
+      if (!res.value) { return null; }
+      var out = {};
+      res.value.split("\n").forEach(function (line) {
+        var i = line.indexOf("=");
+        if (i > 0) { out[line.slice(0, i).trim()] = line.slice(i + 1).trim(); }
+      });
+      return out;
+    });
+    var v4P = readText("https://api.ipify.org");
+    var v6P = readText("https://api6.ipify.org");
+
+    var perService = SERVICES.map(function (s) {
+      return Promise.all([doh(s.dom), touch("https://" + s.dom + "/")]).then(function (r) {
+        var addrs = r[0];
+        var probe = r[1];
+        var primary = addrs.length ? addrs[0] : "";
+        var cls = "none";
+        if (primary) { cls = OWNER[s.kind].test(primary) ? "real" : "other"; }
+        var state, ok;
+        if (probe.value) { state = "отвечает"; ok = true; }
+        else if (probe.timedOut) { state = "нет ответа за " + (TIMEOUT_MS / 1000) + " с"; ok = false; }
+        else if (primary) { state = "ответ скрыт браузером, сеть есть"; ok = true; }
+        else { state = "связи нет"; ok = false; }
+        return { name: s.name, dom: s.dom, addrs: addrs, primary: primary, cls: cls,
+                 state: state, ok: ok };
       });
     });
 
-    Promise.all([t, v4, v6, Promise.all(probes)]).then(function (all) {
-      var tr = all[0].value || null;
+    Promise.all([traceP, v4P, v6P, Promise.all(perService)]).then(function (all) {
+      var tr = all[0] || null;
       var ipv4 = (all[1].value || "").trim();
       var ipv6 = (all[2].value || "").trim();
       var services = all[3];
 
-      if (all[0].error || all[0].timedOut) { result.errors.push("запрос trace не прошёл"); }
-      result.exit = tr ? { ip: tr.ip || "", loc: tr.loc || "", http: tr.http || "", warp: tr.warp || "" } : null;
-      result.ipv4 = ipv4;
-      result.ipv6 = ipv6;
-      result.services = services;
-
+      // --- соединение
       var netHtml = "";
       netHtml += row("Адрес выхода", tr && tr.ip ? esc(tr.ip) : '<span class="bad">не определён</span>');
-      netHtml += row("Страна выхода", tr && tr.loc ? esc(tr.loc) : "не определена",
-        tr && tr.loc === "US" ? "ok" : "");
+      netHtml += row("Страна выхода", tr && tr.loc ? esc(tr.loc) : "не определена", tr && tr.loc === "US" ? "ok" : (tr && tr.loc ? "warn" : ""));
       netHtml += row("Протокол", tr && tr.http ? esc(tr.http) : "не определён");
-      netHtml += row("WARP", tr && tr.warp ? esc(tr.warp) : "нет данных");
       netHtml += row("IPv4", ipv4 ? esc(ipv4) : "нет ответа");
-      netHtml += row("IPv6", ipv6 ? esc(ipv6) + " — есть выход по IPv6" : "нет ответа (IPv6 не используется)",
-        ipv6 ? "warn" : "");
+      netHtml += row("IPv6", ipv6 ? esc(ipv6) + " — есть выход по IPv6" : "нет ответа (IPv6 не используется)", ipv6 ? "warn" : "");
       el("net").innerHTML = netHtml;
 
+      // --- адреса
+      var dnsHtml = "";
+      services.forEach(function (s) {
+        var text, cls;
+        if (!s.primary) { text = "не получен"; cls = "bad"; }
+        else if (s.cls === "real") { text = esc(s.primary) + " — настоящий адрес"; cls = "ok"; }
+        else { text = esc(s.primary) + " — не похож на адрес сервиса"; cls = "warn"; }
+        dnsHtml += row(esc(s.name), text, cls);
+      });
+      el("dns").innerHTML = dnsHtml;
+
+      // --- ответ сервисов
       var svcHtml = "";
       services.forEach(function (s) {
         svcHtml += row(esc(s.name), esc(s.state), s.ok ? "ok" : "bad");
       });
       el("svc").innerHTML = svcHtml;
 
-      var vHtml = "";
-      var badList = services.filter(function (s) { return !s.ok; }).map(function (s) { return s.name; });
+      // --- вердикт
+      var bad = services.filter(function (s) { return !s.ok; });
+      var wrongAddr = services.filter(function (s) { return s.primary && s.cls !== "real"; });
+      var noDns = services.filter(function (s) { return !s.primary; });
+      var v = "";
       if (tr && tr.loc === "US") {
-        vHtml += row("Страна", "выход из США — как нужно для Gemini и NotebookLM", "ok");
+        v += row("Страна", "выход из США — как нужно для Gemini и NotebookLM", "ok");
       } else if (tr && tr.loc) {
-        vHtml += row("Страна", "выход не из США (" + esc(tr.loc) + "): Gemini и NotebookLM работают только через США", "warn");
-      }
-      if (badList.length === 0) {
-        vHtml += row("Сервисы", "все четыре отвечают — дело не в сети, проверяйте вход в аккаунт и браузер", "ok");
+        v += row("Страна", "выход не из США (" + esc(tr.loc) + "): Gemini и NotebookLM работают только через США", "warn");
       } else {
-        vHtml += row("Сервисы", "нет связи: " + esc(badList.join(", ")), "bad");
+        v += row("Страна", "выход не определён — вероятно, интернета нет", "bad");
       }
-      if (ipv6) {
-        vHtml += row("IPv6", "работает и выходит с адреса " + esc(ipv6) + " — часть трафика может идти мимо VPN", "warn");
+      if (bad.length === 0) {
+        v += row("Сервисы", "все четыре отвечают — дело не в сети, проверяйте вход в аккаунт и браузер", "ok");
+      } else {
+        v += row("Сервисы", "не отвечают: " + esc(bad.map(function (s) { return s.name; }).join(", ")), "bad");
       }
-      el("verdict").innerHTML = vHtml;
+      if (noDns.length === 4) {
+        v += row("Адреса", "не получены ни для одного сервиса — проверка адресов в браузере заблокирована", "warn");
+      } else if (wrongAddr.length) {
+        v += row("Адреса", "не похожи на настоящие: " + esc(wrongAddr.map(function (s) { return s.name; }).join(", ")), "warn");
+      } else {
+        v += row("Адреса", "настоящие у всех четырёх сервисов", "ok");
+      }
+      if (ipv6) { v += row("IPv6", "работает и выходит с адреса " + esc(ipv6) + " — часть трафика может идти мимо VPN", "warn"); }
+      el("verdict").innerHTML = v;
 
-      var lines = [];
-      lines.push("VsemDOSTUP — проверка ИИ-сервисов на телефоне");
-      lines.push("Дата и время: " + result.time);
-      lines.push("Адрес выхода: " + (tr && tr.ip ? tr.ip : "не определён"));
-      lines.push("Страна выхода: " + (tr && tr.loc ? tr.loc : "не определена"));
-      lines.push("Протокол: " + (tr && tr.http ? tr.http : "не определён"));
-      lines.push("IPv4: " + (ipv4 || "нет ответа"));
-      lines.push("IPv6: " + (ipv6 || "нет ответа (IPv6 не используется)"));
-      lines.push("Проверка сервисов (есть ли связь с сайтом):");
-      services.forEach(function (s) { lines.push("  " + s.name + " (" + s.url + "): " + s.state); });
-      lines.push("Выводы:");
+      // --- отчёт
+      var L = [];
+      L.push("VsemDOSTUP — проверка ИИ-сервисов на телефоне");
+      L.push("Начало проверки: " + started);
+      L.push("Дата и время: " + fmtTime());
+      L.push("Адрес выхода: " + (tr && tr.ip ? tr.ip : "не определён"));
+      L.push("Страна выхода: " + (tr && tr.loc ? tr.loc : "не определена"));
+      L.push("Протокол: " + (tr && tr.http ? tr.http : "не определён"));
+      L.push("IPv4: " + (ipv4 || "нет ответа"));
+      L.push("IPv6: " + (ipv6 || "нет ответа (IPv6 не используется)"));
+      L.push("Адреса сервисов (защищённый канал DoH):");
+      services.forEach(function (s) {
+        var a = s.addrs.length ? s.addrs.join(", ") : "не получен";
+        var mark = !s.primary ? "" : (s.cls === "real" ? " (настоящий)" : " (не похож на адрес сервиса)");
+        L.push("  " + s.name + " (" + s.dom + "): " + a + mark);
+      });
+      L.push("Ответ сервисов из браузера:");
+      services.forEach(function (s) { L.push("  " + s.name + ": " + s.state); });
+      L.push("Выводы:");
       if (tr && tr.loc === "US") {
-        lines.push("  Страна выхода США — как нужно для Gemini и NotebookLM.");
+        L.push("  Страна выхода США — как нужно для Gemini и NotebookLM.");
       } else if (tr && tr.loc) {
-        lines.push("  Страна выхода не США — Gemini и NotebookLM работают только через США.");
+        L.push("  Страна выхода не США — Gemini и NotebookLM работают только через США.");
       }
-      if (badList.length === 0) {
-        lines.push("  Все четыре сервиса отвечают: сеть в порядке, причина в браузере или аккаунте.");
+      if (bad.length === 0) {
+        L.push("  Все четыре сервиса отвечают: сеть в порядке, причина в браузере или аккаунте.");
       } else {
-        lines.push("  Нет связи: " + badList.join(", ") + " — причина в DNS, в выборе локации или в канале.");
+        L.push("  Не отвечают: " + bad.map(function (s) { return s.name; }).join(", ") + ".");
       }
-      if (ipv6) { lines.push("  IPv6 работает: часть трафика может идти мимо VPN."); }
-      lines.push("Границы: страница не показывает адреса DNS и имя туннеля — для этого нужен скрипт на компьютере.");
-      el("report").value = lines.join("\n");
+      if (ipv6) { L.push("  IPv6 работает: часть трафика может идти мимо VPN."); }
+      L.push("Границы: браузер не показывает системные адреса DNS и имя туннеля.");
+      L.push("Полный отчёт с DNS и маршрутом даёт скрипт на компьютере или Termux на Android.");
+      el("report").value = L.join("\n");
     });
   }
 
